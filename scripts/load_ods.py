@@ -47,24 +47,6 @@ def verify_file(path: Path, columns: tuple[str, ...]) -> None:
         raise ValueError(f"Unexpected header in {path.name}: {header!r}")
 
 
-def resolve_dsn() -> str:
-    """获取数据库连接串，按优先级自动获取：系统环境变量 -> .env 文件 -> .env.example 文件"""
-    if dsn := os.environ.get("OULAD_PG_DSN"):
-        return dsn
-
-    for filename in (".env", ".env.example"):
-        env_file = ROOT / filename
-        if env_file.is_file():
-            for line in env_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("OULAD_PG_DSN="):
-                    val = line.split("=", 1)[1].strip().strip("'\"")
-                    if val and not val.startswith("postgresql://USER:PASSWORD"):
-                        return val
-
-    raise SystemExit("未检测到数据库连接配置，请在系统环境变量或 .env 中设置 OULAD_PG_DSN")
-
-
 # ==========================================
 # 4. 主加载业务流程
 # ==========================================
@@ -79,8 +61,10 @@ def main() -> None:
     # --- 步骤 4.2：校验本地 CSV 文件与字段契约 ---
     verify_file(path, columns)
 
-    # --- 步骤 4.3：自动获取数据库连接配置并检查数据库驱动 ---
-    dsn = resolve_dsn()
+    # --- 步骤 4.3：检查环境变量配置与数据库驱动 ---
+    dsn = os.environ.get("OULAD_PG_DSN")
+    if not dsn:
+        raise SystemExit("Set OULAD_PG_DSN before loading data")
     try:
         import psycopg
     except ImportError as error:
