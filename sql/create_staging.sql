@@ -91,7 +91,7 @@ FROM ods.assessments;
 -- 清洗动作：
 --   1) date_submitted 安全转换为 INTEGER 相对天数
 --   2) is_banked ('0'/'1') 转换为规范布尔值 BOOLEAN
---   3) score 过滤空值（173条缺考），转换为 NUMERIC(5, 2)
+--   3) score 过滤空值（173条分数缺失），转换为 NUMERIC(5, 2)
 -- ------------------------------------------------------------------------------
 DROP TABLE IF EXISTS stg.student_assessment;
 
