@@ -83,16 +83,17 @@
 
 ---
 
-### 5. 跨事实域轻度汇总宽表深挖：两步对齐架构、口径真实性治理与 19 重守恒门禁
-* **面试官追问**：“跨多张千万级事实表构建宽表时，如何避免笛卡尔积膨胀？如何处理考核权重不一导致的学生成绩失真？DWS 是如何支撑多维度业务需求的？”
+### 5. 跨事实域轻度汇总宽表深挖：两步对齐架构、异构考评归一化与公历时序锚点治理
+* **面试官追问**：“跨多张千万级事实表构建宽表时，如何避免笛卡尔积膨胀？如何处理异构考核大纲（有/无期末考、权重缺失）导致的学生成绩失真？跨学期的相对时间序列如何科学去重？”
 * **核心对答点**：
   1. **两步对齐架构（Two-step CTE Alignment）**：在 [create_dws.sql](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/sql/create_dws.sql) 中，拒绝直接多表级联 JOIN。先通过 CTE 将考评明细（17.4 万行）与 VLE 交互流水（846 万行）分别按 `(student_key, course_key)` 预聚合，再以选课主干（32,593 行）平铺打宽，耗时仅 1.6s，彻底杜绝数据膨胀并实现毫秒级下游单表查询。
-  2. **学业口径真实性治理（累计加权总分替代虚高均值）**：揭示传统简单算术平均与挑考加权均值“把退学弃考生误判为 100 分假学霸”的致命缺陷；遵循真实教务规则，确立 `accumulated_weighted_score = SUM(score * weight / 100)` 为唯一核心度量，实测 Distinction 平均 100.6 分，Pass 平均 81.5 分，Withdrawn 真实压低至 16.8 分，彻底还原真实学业贡献度。
-  3. **三维立体 DWS 宽表矩阵**：
-     - **单科选课汇总表 (`dws.student_course_summary`, 32,593 行)**：面向学生单学期作战级监控与学情预警。
-     - **全生命周期画像表 (`dws.student_lifetime_summary`, 28,785 行)**：面向学生大学 4 年生涯档案（Student 360）与跨科 GPA，跨课程严格去重自然活跃天数。
-     - **课程开设运营成效表 (`dws.course_presentation_summary`, 22 行)**：面向教务学院宏观教学运营，细分课件/论坛/测验点击投入并保持纯可加分子分母。
-  4. **事务提交前 19 重守恒门禁**：在 [load_dws.py](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/scripts/load_dws.py) 单事务中执行门禁，确保 39,605,099 次平台点击、32,593 选课人次与 173,912 条考评记录绝对守恒，未出分考生严格为 0.00 分，异常自动 ROLLBACK。
+  2. **异构考评大纲治理与 100 分制学术归一化**：
+     - **揭示口径缺陷**：深入发现传统暴力累加把期末考试（Exam）混入平时成绩，导致 CCC/DDD 课程 3,949 名学生得分突破 100 分（最高达 200 分），且导致无权重课程 GGG 学生全员 0 分假学渣的严重口径污染。
+     - **三元度量分权与动态路由归一化**：将指标拆解为纯平时加权分 `ca_weighted_score`（排除 Exam，上限 100）、期末考卷面分 `exam_score`（0~100）及综合学术得分 `course_academic_score`（0~100）。针对三类大纲动态路由：无期末考课程取平时分；有期末考课程按平时与期末各 50% 归一化；无权重课程取平时作业等权均分。实测 Distinction 稳定在 82~90 分，Pass 稳定在 62~80 分，Fail 稳定在 15~44 分，全员严格收敛至 [0.00, 100.00]，彻底保障了跨课程 GPA 与 ADS 排名的真实性。
+  3. **跨学期相对时序向物理公历锚点对齐（Active Days 时序治理）**：
+     - **发现相对时间去重缺陷**：原始数据仅记录相对开课天数 `interaction_day_offset`，若直接跨课程去重，会导致跨学期选课学生在不同年份的“第 10 天”被错误合并，导致 1,991 名学生的活跃天数被系统性严重低估。
+     - **公历锚点对齐架构**：基于学期规范（B 为 2 月，J 为 10 月）构建物理锚点日期，利用 PostgreSQL 原生 `anchor_date + interaction_day_offset` 还原真实公历日。既实现了同考期多选课学生的物理天精准合并，又杜绝了跨考期误吞，实测 Index Only Scan 5.7 秒完成 846 万行极速去重。
+  4. **事务提交前 19 重守恒门禁**：在 [load_dws.py](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/scripts/load_dws.py) 单事务中执行门禁，确保 39,605,099 次平台点击、32,593 选课人次与 173,912 条考评记录绝对守恒，学术分 100% 处于 [0, 100] 合法区间，异常自动 ROLLBACK。
 * **工程落地点**：
   * [create_dws.sql](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/sql/create_dws.sql)（DWS 3 张核心实体宽表构建）
   * [load_dws.py](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/scripts/load_dws.py)（19 重 Pre-commit 守恒门禁与自动化校验）

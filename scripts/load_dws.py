@@ -95,7 +95,7 @@ def validate_dws_student_course_summary(cursor) -> None:
         )
     print("   [PASS] 迟交指标合法性校验: late_assessment_count <= late_eligible_count 100% 成立")
 
-    # 6. 累计加权总分与得分计数语义一致性校验 (Accumulated Score Sanity Check)
+    # 6. 综合学术分与平时加权分规范校验 (Academic Score Sanity Check, [0.00, 100.00] 刚性约束)
     cursor.execute("""
         SELECT COUNT(*) 
         FROM dws.student_course_summary 
@@ -107,28 +107,43 @@ def validate_dws_student_course_summary(cursor) -> None:
             f"❌ 考核得分计数校验失败：发现 {scored_violations} 条记录的得分次数大于总考核数！"
         )
 
+    # 刚性门禁：平时加权分不得为负，不得超过 100.00 分
     cursor.execute("""
         SELECT COUNT(*) 
         FROM dws.student_course_summary 
-        WHERE scored_assessment_count = 0 AND accumulated_weighted_score != 0.00;
+        WHERE ca_weighted_score < 0.00 OR ca_weighted_score > 100.00;
     """)
-    zero_score_violations = cursor.fetchone()[0]
-    if zero_score_violations != 0:
+    ca_violations = cursor.fetchone()[0]
+    if ca_violations != 0:
         raise RuntimeError(
-            f"❌ 零分语义校验失败：发现 {zero_score_violations} 条无得分记录的 accumulated_weighted_score 不为 0.00！"
+            f"❌ 平时加权分越界校验失败：发现 {ca_violations} 条记录的 ca_weighted_score 超出 [0, 100] 区间！"
         )
 
+    # 刚性门禁：综合学术分不得为负，不得超过 100.00 分
     cursor.execute("""
         SELECT COUNT(*) 
         FROM dws.student_course_summary 
-        WHERE accumulated_weighted_score < 0.00;
+        WHERE course_academic_score < 0.00 OR course_academic_score > 100.00;
     """)
-    negative_score_violations = cursor.fetchone()[0]
-    if negative_score_violations != 0:
+    academic_violations = cursor.fetchone()[0]
+    if academic_violations != 0:
         raise RuntimeError(
-            f"❌ 负分异常校验失败：发现 {negative_score_violations} 条记录的加权总分小于 0！"
+            f"❌ 综合学术分越界校验失败：发现 {academic_violations} 条记录的 course_academic_score 超出 [0, 100] 区间！"
         )
-    print("   [PASS] 累计加权总分规范校验: 逻辑无损，无负分异常，无得分考生严格为 0.00")
+
+    # 刚性门禁：期末考试成绩不得超出 [0, 100]
+    cursor.execute("""
+        SELECT COUNT(*) 
+        FROM dws.student_course_summary 
+        WHERE exam_score IS NOT NULL AND (exam_score < 0.00 OR exam_score > 100.00);
+    """)
+    exam_violations = cursor.fetchone()[0]
+    if exam_violations != 0:
+        raise RuntimeError(
+            f"❌ 期末考卷面分越界校验失败：发现 {exam_violations} 条记录的 exam_score 超出 [0, 100] 区间！"
+        )
+
+    print("   [PASS] 学术成绩规范校验: course_academic_score 与 ca_weighted_score 100% 处于 [0, 100] 规范区间，杜绝假学霸")
 
     # 7. 逻辑外键与非空约束完整性校验 (Logical FK & Not Null Integrity)
     cursor.execute("""
@@ -339,7 +354,9 @@ def print_dws_analytics_summary(cursor) -> None:
             ROUND(AVG(total_vle_clicks), 1) AS avg_student_clicks,
             ROUND(AVG(active_vle_days), 1) AS avg_active_days,
             ROUND(AVG(visited_vle_resources), 1) AS avg_visited_resources,
-            ROUND(AVG(accumulated_weighted_score), 2) AS overall_avg_accumulated_score,
+            ROUND(AVG(ca_weighted_score), 2) AS avg_ca_score,
+            ROUND(AVG(course_academic_score), 2) AS avg_academic_score,
+            ROUND(AVG(exam_score), 2) AS avg_exam_score,
             ROUND(SUM(late_assessment_count)::numeric / NULLIF(SUM(late_eligible_count), 0) * 100, 2) AS overall_late_rate
         FROM dws.student_course_summary;
     """)
@@ -350,8 +367,10 @@ def print_dws_analytics_summary(cursor) -> None:
     print(f"   - 人均平台交互点击量 (Avg Clicks)      : {row[5]:,} 次")
     print(f"   - 人均实际上线天数 (Avg Active Days)   : {row[6]} 天")
     print(f"   - 人均访问资源数 (Avg Visited Items)   : {row[7]} 项")
-    print(f"   - 人均累计平时加权总分 (Avg Acc Score) : {row[8]} 分")
-    print(f"   - 全校作业综合迟交率 (Overall Late Rate): {row[9]}%")
+    print(f"   - 人均平时作业加权分 (Avg CA Score)    : {row[8]} 分 (满分 100)")
+    print(f"   - 人均综合学术修课得分 (Course Score)  : {row[9]} 分 (满分 100，标准 GPA 来源)")
+    print(f"   - 参加期末考卷面均分 (Avg Exam Score)  : {row[10]} 分")
+    print(f"   - 全校作业综合迟交率 (Overall Late Rate): {row[11]}%")
 
     print("\n📊 2. dws.student_lifetime_summary（学生全生命周期 360 表）关键业务画像：")
     cursor.execute("""

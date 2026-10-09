@@ -29,7 +29,9 @@ CREATE TABLE dws.student_course_summary (
     -- 考核学业表现度量（来自 fact_student_assessment 聚合）
     assessment_record_count    INTEGER NOT NULL DEFAULT 0,
     scored_assessment_count    INTEGER NOT NULL DEFAULT 0,
-    accumulated_weighted_score NUMERIC(5, 2) NOT NULL DEFAULT 0.00,
+    ca_weighted_score          NUMERIC(5, 2) NOT NULL DEFAULT 0.00,
+    exam_score                 NUMERIC(5, 2),
+    course_academic_score      NUMERIC(5, 2) NOT NULL DEFAULT 0.00,
     banked_assessment_count    INTEGER NOT NULL DEFAULT 0,
     late_eligible_count        INTEGER NOT NULL DEFAULT 0,
     late_assessment_count      INTEGER NOT NULL DEFAULT 0,
@@ -56,7 +58,9 @@ COMMENT ON COLUMN dws.student_course_summary.unregistration_day_offset IS '退�
 COMMENT ON COLUMN dws.student_course_summary.final_result IS '教务最终评定结果（Pass/Distinction/Fail/Withdrawn）';
 COMMENT ON COLUMN dws.student_course_summary.assessment_record_count IS '考核记录总数（无考核为 0）';
 COMMENT ON COLUMN dws.student_course_summary.scored_assessment_count IS '有得分的考核记录数（真实判分次数）';
-COMMENT ON COLUMN dws.student_course_summary.accumulated_weighted_score IS '平时考核累计加权总分（各项 score * weight / 100 汇总求和，真实反映平时分贡献）';
+COMMENT ON COLUMN dws.student_course_summary.ca_weighted_score IS '平时考核累计加权总分（排除期末考，仅 TMA+CMA，满分 100 分制，反映平时作业学术分）';
+COMMENT ON COLUMN dws.student_course_summary.exam_score IS '期末大考卷面得分（仅限 CCC/DDD 参加考试学生，满分 100 分制，无考卷或缺考为 NULL）';
+COMMENT ON COLUMN dws.student_course_summary.course_academic_score IS '课程综合学术得分（满分 100 分制，按大纲类型归一化路由：无考课为平时分，有考课为平时与期末各半，GGG 为平时等权均分，专供 GPA 与 ADS 排名）';
 COMMENT ON COLUMN dws.student_course_summary.banked_assessment_count IS '沿用免修免考成绩的记录数';
 COMMENT ON COLUMN dws.student_course_summary.late_eligible_count IS '可考核迟交的有效基数（排除免修置换与无截止日记录，作为迟交率分母）';
 COMMENT ON COLUMN dws.student_course_summary.late_assessment_count IS '迟交逾期的考核次数（作为迟交率分子）';
@@ -77,7 +81,9 @@ INSERT INTO dws.student_course_summary (
     final_result,
     assessment_record_count,
     scored_assessment_count,
-    accumulated_weighted_score,
+    ca_weighted_score,
+    exam_score,
+    course_academic_score,
     banked_assessment_count,
     late_eligible_count,
     late_assessment_count,
@@ -88,16 +94,19 @@ INSERT INTO dws.student_course_summary (
 )
 WITH cte_assessment AS (
     SELECT
-        student_key,
-        course_key,
+        f.student_key,
+        f.course_key,
         COUNT(*) AS assessment_record_count,
-        COUNT(score) AS scored_assessment_count,
-        COALESCE(ROUND(SUM(weighted_score), 2), 0.00) AS accumulated_weighted_score,
-        COUNT(CASE WHEN is_banked THEN 1 END) AS banked_assessment_count,
-        COUNT(submission_delay_days) AS late_eligible_count,
-        COUNT(CASE WHEN submission_delay_days > 0 THEN 1 END) AS late_assessment_count
-    FROM dwd.fact_student_assessment
-    GROUP BY student_key, course_key
+        COUNT(f.score) AS scored_assessment_count,
+        COALESCE(ROUND(SUM(CASE WHEN a.assessment_type != 'Exam' THEN f.weighted_score ELSE 0 END), 2), 0.00) AS ca_weighted_score,
+        MAX(CASE WHEN a.assessment_type = 'Exam' THEN f.score ELSE NULL END) AS exam_score,
+        ROUND(AVG(CASE WHEN a.assessment_type != 'Exam' THEN f.score ELSE NULL END), 2) AS ca_avg_score,
+        COUNT(CASE WHEN f.is_banked THEN 1 END) AS banked_assessment_count,
+        COUNT(f.submission_delay_days) AS late_eligible_count,
+        COUNT(CASE WHEN f.submission_delay_days > 0 THEN 1 END) AS late_assessment_count
+    FROM dwd.fact_student_assessment f
+    JOIN dim.dim_assessment a ON f.assessment_key = a.assessment_key
+    GROUP BY f.student_key, f.course_key
 ),
 cte_vle AS (
     SELECT
@@ -120,7 +129,16 @@ SELECT
     e.final_result,
     COALESCE(a.assessment_record_count, 0) AS assessment_record_count,
     COALESCE(a.scored_assessment_count, 0) AS scored_assessment_count,
-    COALESCE(a.accumulated_weighted_score, 0.00) AS accumulated_weighted_score,
+    COALESCE(a.ca_weighted_score, 0.00) AS ca_weighted_score,
+    a.exam_score AS exam_score,
+    CASE 
+        WHEN c.code_module IN ('CCC', 'DDD') THEN
+            ROUND(0.5 * COALESCE(a.ca_weighted_score, 0.00) + 0.5 * COALESCE(a.exam_score, 0.00), 2)
+        WHEN c.code_module = 'GGG' THEN
+            COALESCE(a.ca_avg_score, 0.00)
+        ELSE
+            COALESCE(a.ca_weighted_score, 0.00)
+    END AS course_academic_score,
     COALESCE(a.banked_assessment_count, 0) AS banked_assessment_count,
     COALESCE(a.late_eligible_count, 0) AS late_eligible_count,
     COALESCE(a.late_assessment_count, 0) AS late_assessment_count,
@@ -222,18 +240,26 @@ WITH cte_course_summary AS (
         COUNT(CASE WHEN final_result = 'Withdrawn' THEN 1 END) AS total_courses_withdrawn,
         COUNT(CASE WHEN final_result = 'Fail' THEN 1 END) AS total_courses_failed,
         ROUND(COUNT(CASE WHEN final_result IN ('Pass', 'Distinction') THEN 1 END)::numeric / COUNT(*), 4) AS course_pass_rate,
-        ROUND(AVG(accumulated_weighted_score), 2) AS avg_course_score
+        ROUND(AVG(course_academic_score), 2) AS avg_course_score
     FROM dws.student_course_summary
     GROUP BY student_key
 ),
 cte_vle_lifetime AS (
     SELECT
-        student_key,
-        COALESCE(SUM(click_count), 0) AS lifetime_total_clicks,
-        COUNT(DISTINCT interaction_day_offset) AS lifetime_active_days,
-        COUNT(DISTINCT vle_key) AS lifetime_visited_resources
-    FROM dwd.fact_student_vle
-    GROUP BY student_key
+        f.student_key,
+        COALESCE(SUM(f.click_count), 0) AS lifetime_total_clicks,
+        COUNT(DISTINCT (
+            CASE c.code_presentation 
+                WHEN '2013B' THEN DATE '2013-02-01'
+                WHEN '2013J' THEN DATE '2013-10-01'
+                WHEN '2014B' THEN DATE '2014-02-01'
+                WHEN '2014J' THEN DATE '2014-10-01'
+            END + f.interaction_day_offset
+        )) AS lifetime_active_days,
+        COUNT(DISTINCT f.vle_key) AS lifetime_visited_resources
+    FROM dwd.fact_student_vle f
+    JOIN dim.dim_course c ON f.course_key = c.course_key
+    GROUP BY f.student_key
 )
 SELECT
     s.student_key,
@@ -336,7 +362,7 @@ WITH cte_enrollment_summary AS (
         COUNT(CASE WHEN final_result IN ('Pass', 'Distinction') THEN 1 END) AS total_passed_students,
         COUNT(CASE WHEN final_result = 'Withdrawn' THEN 1 END) AS total_withdrawn_students,
         COUNT(CASE WHEN final_result = 'Fail' THEN 1 END) AS total_failed_students,
-        ROUND(AVG(accumulated_weighted_score), 2) AS avg_course_score
+        ROUND(AVG(course_academic_score), 2) AS avg_course_score
     FROM dws.student_course_summary
     GROUP BY course_key
 ),
