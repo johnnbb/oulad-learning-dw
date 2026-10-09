@@ -18,6 +18,9 @@
 * **混合事实表建模与事务级质量拦截门禁（明细事实与质量工程）**：
   将选课流程建模为**累积型快照事实表**，单行闭环覆盖报名注册、中途退课至结课总评全生命周期（沉淀 Postgres 原地 UPSERT 与湖仓 MERGE INTO 更新对比）；将考评与交互行为落地为**事务型事实表**并下沉逾期天数等分析度量；设计事务提交前（Pre-commit Gate）强校验机制，通过业务键去重、双向差集 0 孤儿核验与动态行数强对齐，实现异常自动 ROLLBACK，彻底拦截脏数据。
 
+* **跨事实域轻度汇总宽表与口径真实性治理（DWS 服务层设计）**：
+  针对选课生命周期、考评大纲与千万级交互流水三大业务域，设计两步对齐打宽架构（Two-step CTE Alignment），杜绝级联关联的笛卡尔积膨胀，将 846 万行明细与 17 万行考评数据秒级收敛为 3.2 万行单科画像宽表；深入治理平时考核权重偏差与弃考场景，以“累计加权总分”替代虚高均值，并成对保留迟交分子分母以确保上卷可加性；在装载中内置 7 重质量门禁，实现 3960 万次平台交互点击与考评记录的绝对守恒。
+
 * **湖仓演进与分布式特征工程（计算扩展与价值输出）**：
   设计从关系型数仓向湖仓一体（MinIO + Parquet）平滑演进架构。利用 Docker 编排 PySpark 算力，通过滑动时间窗口（Rolling Window）分布式提取学生周活跃度、交互沉迷度与迟交拖延特征，沉淀学生综合宽表，为下游学业挂科与退学预警模型提供高可用特征工程支撑。
 
@@ -80,10 +83,40 @@
 
 ---
 
+### 5. 跨事实域轻度汇总宽表深挖：两步对齐架构、口径真实性治理与 19 重守恒门禁
+* **面试官追问**：“跨多张千万级事实表构建宽表时，如何避免笛卡尔积膨胀？如何处理考核权重不一导致的学生成绩失真？DWS 是如何支撑多维度业务需求的？”
+* **核心对答点**：
+  1. **两步对齐架构（Two-step CTE Alignment）**：在 [create_dws.sql](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/sql/create_dws.sql) 中，拒绝直接多表级联 JOIN。先通过 CTE 将考评明细（17.4 万行）与 VLE 交互流水（846 万行）分别按 `(student_key, course_key)` 预聚合，再以选课主干（32,593 行）平铺打宽，耗时仅 1.6s，彻底杜绝数据膨胀并实现毫秒级下游单表查询。
+  2. **学业口径真实性治理（累计加权总分替代虚高均值）**：揭示传统简单算术平均与挑考加权均值“把退学弃考生误判为 100 分假学霸”的致命缺陷；遵循真实教务规则，确立 `accumulated_weighted_score = SUM(score * weight / 100)` 为唯一核心度量，实测 Distinction 平均 100.6 分，Pass 平均 81.5 分，Withdrawn 真实压低至 16.8 分，彻底还原真实学业贡献度。
+  3. **三维立体 DWS 宽表矩阵**：
+     - **单科选课汇总表 (`dws.student_course_summary`, 32,593 行)**：面向学生单学期作战级监控与学情预警。
+     - **全生命周期画像表 (`dws.student_lifetime_summary`, 28,785 行)**：面向学生大学 4 年生涯档案（Student 360）与跨科 GPA，跨课程严格去重自然活跃天数。
+     - **课程开设运营成效表 (`dws.course_presentation_summary`, 22 行)**：面向教务学院宏观教学运营，细分课件/论坛/测验点击投入并保持纯可加分子分母。
+  4. **事务提交前 19 重守恒门禁**：在 [load_dws.py](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/scripts/load_dws.py) 单事务中执行门禁，确保 39,605,099 次平台点击、32,593 选课人次与 173,912 条考评记录绝对守恒，未出分考生严格为 0.00 分，异常自动 ROLLBACK。
+* **工程落地点**：
+  * [create_dws.sql](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/sql/create_dws.sql)（DWS 3 张核心实体宽表构建）
+  * [load_dws.py](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/scripts/load_dws.py)（19 重 Pre-commit 守恒门禁与自动化校验）
+
+---
+
+### 6. 维度与事实边界哲学深挖：静态配置维度（客体） vs 动态行为事实（主体）
+* **面试官追问**：“在你们的 DWD 明细层中，为什么事实表全部以学生（Student）为主语，而没有单独的课程事实表（如 Course Enrollment / Course Assessment / Course VLE）？课程视角的主题表在何时才会出现？”
+* **核心对答点**：
+  1. **主体与客体的行为哲学（第一性原理）**：在现实业务中，客观发生的动态流水事件必然由**行为主体（学生）**主动发起（学生选课、学生交卷、学生点击）。课程（Course）、考题大纲（Assessment）、平台资源（VLE）是教务处预设的**静态配置元数据（客体与环境）**，在数仓中归属于 **DIM 维度层**。
+  2. **星型模型枢纽连结**：DWD 事实表本质是连结各大维度的业务事件枢纽。所谓“选课事件”，就是学生维度与课程维度的多对多联结，已内嵌 `course_key`，命名为 `fact_student_enrollment` 还是 `fact_course_enrollment` 在物理明细上是同一张表，无需重复冗余。
+  3. **课程主语的诞生时机（DWS / ADS）**：只有到了 **DWS 轻度汇总层** 与 **ADS 应用层**，当业务需要抹平学生个体差异、将海量流水按课程开设班次（22 行）进行上卷聚合（Roll-up）时，以 Course 为主语的经营宽表（如 `course_presentation_summary`）才正式诞生。
+* **工程落地点**：
+  * [sql/create_dim.sql](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/sql/create_dim.sql)（静态大纲配置维表）
+  * [sql/create_dwd.sql](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/sql/create_dwd.sql)（学生行为事务事实表）
+  * [sql/create_dws.sql](file:///Users/johnnbb/Desktop/project/oulad-learning-dw/sql/create_dws.sql)（课程主题上卷聚合表）
+
+---
+
 ## 三、版本迭代记录
 
 | 版本号 | 日期 | 覆盖范围 | 变更摘要 |
 | :--- | :--- | :--- | :--- |
 | **v1.0** | 2026-10-08 | ODS, STG, DIM, DWD(选课/考核) | 完成基础接入、Kimball 代理键、逻辑外键解耦、累积快照事实表与 Pre-commit 原子质量门禁提炼。 |
 | **v1.1** | 2026-10-08 | DWD(平台交互表) | 落地 845 万行 VLE 交互明细事实表（日粒度收敛消除 219 万碎行，3960 万点击量绝对守恒）。 |
-| *v1.2* (待推进) | 待定 | DWS, ADS, 特征工程 | 补充学生全生命周期综合宽表与 PySpark 分布式滑动窗口周活跃度提取。 |
+| **v1.2** | 2026-10-09 | DWS(轻度汇总宽表矩阵) | 落地 DWS 3 大核心实体宽表（单科选课 3.2w 行、全生命周期 2.8w 行、课程运营 22 行），口径真实性治理与 19 重守恒门禁全部跑通。 |
+| *v1.3* (待推进) | 待定 | ADS(应用层看板与特征工程) | 推进 ADS 层学业预警大屏、流失归因宽表与 PySpark 分布式滑动窗口周特征提取。 |
