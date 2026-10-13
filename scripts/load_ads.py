@@ -242,6 +242,169 @@ def print_teaching_kpi_dashboard(cursor) -> None:
     print("=" * 140 + "\n")
 
 
+def validate_ads_student_course_diagnostic(cursor) -> None:
+    """全面校验 ads.ads_student_course_diagnostic 数据质量、粒度守恒、分位数与客观事实标签一致性。
+    若发现任何数据异常，立即抛出 RuntimeError 并自动回滚。
+    """
+    print("\n🔍 执行 ADS 期末学生单科学情诊断表装载前置数据质量门禁（事务提交前）...")
+
+    # 1. 声明粒度与行数绝对对齐校验 (32,593 行)
+    cursor.execute("SELECT COUNT(*) FROM ads.ads_student_course_diagnostic;")
+    diag_rows = cursor.fetchone()[0]
+    if diag_rows != 32593:
+        raise RuntimeError(
+            f"❌ 粒度行数校验失败：诊断表总行数 ({diag_rows:,}) 不等于 32,593！"
+        )
+    print(f"   [PASS] 声明粒度对齐校验: 全校选课人次精准覆盖 ({diag_rows:,} 行)")
+
+    # 2. 联合代理主键唯一性校验 (student_key, course_key)
+    cursor.execute("""
+        SELECT COUNT(*) - COUNT(DISTINCT (student_key, course_key))
+        FROM ads.ads_student_course_diagnostic;
+    """)
+    pk_dups = cursor.fetchone()[0]
+    if pk_dups != 0:
+        raise RuntimeError(f"❌ 联合主键唯一性校验失败：存在 {pk_dups} 条重复记录！")
+    print("   [PASS] 联合主键唯一性校验: (student_key, course_key) 100% 唯一无重复")
+
+    # 3. 学籍结果分布绝对守恒断言
+    cursor.execute("""
+        SELECT 
+            COUNT(*) FILTER (WHERE final_result = 'Pass'),
+            COUNT(*) FILTER (WHERE final_result = 'Distinction'),
+            COUNT(*) FILTER (WHERE final_result = 'Fail'),
+            COUNT(*) FILTER (WHERE final_result = 'Withdrawn')
+        FROM ads.ads_student_course_diagnostic;
+    """)
+    pass_cnt, dist_cnt, fail_cnt, wd_cnt = cursor.fetchone()
+    if (pass_cnt, dist_cnt, fail_cnt, wd_cnt) != (12361, 3024, 7052, 10156):
+        raise RuntimeError(
+            f"❌ 学籍结果守恒断言失败：分布 ({pass_cnt}, {dist_cnt}, {fail_cnt}, {wd_cnt}) 与事实层不一致！"
+        )
+    print("   [PASS] 学籍考核结果守恒校验: 4 大最终结果分类 (通过/优秀/未通过/退课) 100% 绝对守恒")
+
+    # 4. 考核状态守恒断言
+    cursor.execute("""
+        SELECT 
+            COUNT(*) FILTER (WHERE score_status = 'COMPLETE_SCORE'),
+            COUNT(*) FILTER (WHERE score_status = 'PARTIAL_SCORE'),
+            COUNT(*) FILTER (WHERE score_status = 'NO_SCORE')
+        FROM ads.ads_student_course_diagnostic;
+    """)
+    comp_cnt, part_cnt, no_cnt = cursor.fetchone()
+    if (comp_cnt, part_cnt, no_cnt) != (13395, 12425, 6773):
+        raise RuntimeError(
+            f"❌ 考核状态守恒断言失败：分布 ({comp_cnt}, {part_cnt}, {no_cnt}) 不符标准口径！"
+        )
+    print("   [PASS] 考核完成状态守恒校验: COMPLETE_SCORE (13,395), PARTIAL (12,425), NO_SCORE (6,773) 绝对守恒")
+
+    # 5. 班级百分位合法性与空值理性校验
+    cursor.execute("""
+        SELECT 
+            COUNT(*) FILTER (WHERE class_activity_percentile < 0.00 OR class_activity_percentile > 100.00),
+            COUNT(*) FILTER (WHERE class_score_percentile IS NOT NULL AND (class_score_percentile < 0.00 OR class_score_percentile > 100.00)),
+            COUNT(*) FILTER (WHERE score_status = 'NO_SCORE' AND class_score_percentile IS NOT NULL),
+            COUNT(*) FILTER (WHERE score_status != 'NO_SCORE' AND class_score_percentile IS NULL)
+        FROM ads.ads_student_course_diagnostic;
+    """)
+    act_out, sc_out, no_sc_not_null, sc_is_null = cursor.fetchone()
+    if act_out != 0 or sc_out != 0:
+        raise RuntimeError("❌ 班级百分位越界：存在超出 [0.00, 100.00] 的非法百分位！")
+    if no_sc_not_null != 0 or sc_is_null != 0:
+        raise RuntimeError(
+            f"❌ 成绩分位数空值断言失败：无成绩非空 ({no_sc_not_null}), 有成绩为空 ({sc_is_null})！"
+        )
+    print("   [PASS] 班级百分位区间与空值断言: 活跃度分位全覆盖，成绩分位数仅作用于有分群体")
+
+    # 6. 客观事实标签双向一致性与退课范围断言
+    cursor.execute("""
+        SELECT 
+            COUNT(*) FILTER (WHERE (total_vle_clicks = 0) != is_zero_click),
+            COUNT(*) FILTER (WHERE (score_status = 'NO_SCORE') != is_unrated_enrollment),
+            COUNT(*) FILTER (WHERE (late_assessment_count >= 2) != is_frequent_late),
+            COUNT(*) FILTER (WHERE (num_of_prev_attempts > 0) != is_re_registered),
+            COUNT(*) FILTER (WHERE (COALESCE(final_result = 'Withdrawn' AND unregistration_day_offset < 0, FALSE) != is_pre_course_withdrawn)),
+            COUNT(*) FILTER (WHERE (COALESCE(final_result = 'Withdrawn' AND unregistration_day_offset BETWEEN 0 AND 30, FALSE) != is_early_withdrawn)),
+            COUNT(*) FILTER (WHERE is_early_withdrawn AND (final_result != 'Withdrawn' OR unregistration_day_offset < 0 OR unregistration_day_offset > 30)),
+            COUNT(*) FILTER (WHERE is_pre_course_withdrawn AND (final_result != 'Withdrawn' OR unregistration_day_offset >= 0)),
+            COUNT(*) FILTER (WHERE factual_tag_summary IS NULL OR factual_tag_summary = '')
+        FROM ads.ads_student_course_diagnostic;
+    """)
+    (zero_err, unrated_err, late_err, re_err, pre_wd_err, early_wd_err, 
+     early_wd_bounds, pre_wd_bounds, tag_null) = cursor.fetchone()
+
+    if (zero_err != 0 or unrated_err != 0 or late_err != 0 or re_err != 0 or 
+        pre_wd_err != 0 or early_wd_err != 0 or early_wd_bounds != 0 or 
+        pre_wd_bounds != 0 or tag_null != 0):
+        raise RuntimeError("❌ 客观事实标签逻辑不一致或退课范围越界校验失败！")
+    print("   [PASS] 客观事实标签双向一致性校验: 零点击/未评分/频迟交/重修生/开课前与初期退课标记 100% 精准对应物理事实")
+
+    # 7. 逻辑外键与自然键完整性校验 (0 孤儿)
+    cursor.execute("""
+        SELECT 
+            COUNT(*) FILTER (WHERE s.student_key IS NULL),
+            COUNT(*) FILTER (WHERE c.course_key IS NULL)
+        FROM ads.ads_student_course_diagnostic d
+        LEFT JOIN dim.dim_student s ON d.student_key = s.student_key
+        LEFT JOIN dim.dim_course c ON d.course_key = c.course_key;
+    """)
+    orphan_s, orphan_c = cursor.fetchone()
+    if orphan_s != 0 or orphan_c != 0:
+        raise RuntimeError(f"❌ 逻辑外键完整性校验失败：孤儿学生 ({orphan_s}), 孤儿课程 ({orphan_c})！")
+    print("   [PASS] 逻辑外键完整性校验: 关联维度表 100% 完整匹配 (0 孤儿)")
+
+
+def print_student_diagnostic_dashboard(cursor) -> None:
+    """打印期末学生单科学情诊断终端看板（结果群体对比与高频事实标签矩阵）。"""
+    cursor.execute("""
+        SELECT 
+            final_result,
+            COUNT(*) AS student_count,
+            ROUND(COUNT(*) FILTER (WHERE score_status != 'NO_SCORE')::numeric / COUNT(*) * 100, 1) AS scored_coverage_pct,
+            ROUND(AVG(COALESCE(estimated_course_score, 0.00)), 1) AS avg_enrolled_score,
+            ROUND(AVG(estimated_course_score), 1) AS avg_scored_score,
+            ROUND(AVG(total_vle_clicks), 1) AS avg_clicks,
+            ROUND(AVG(class_activity_percentile), 1) AS avg_activity_pct,
+            COUNT(*) FILTER (WHERE is_zero_click) AS zero_clicks,
+            COUNT(*) FILTER (WHERE is_re_registered) AS re_registered_count
+        FROM ads.ads_student_course_diagnostic
+        GROUP BY final_result
+        ORDER BY avg_clicks DESC;
+    """)
+    result_rows = cursor.fetchall()
+
+    print("\n" + "=" * 140)
+    print("📊 【微观教学复盘矩阵】学生单科学情期末诊断与结果群体对比看板 (ads.ads_student_course_diagnostic)")
+    print("=" * 140)
+    header = (
+        f"{'学籍最终考核结果':^16} | {'选课人次':^10} | {'有成绩占比':^10} | {'全员估算均分':^12} | "
+        f"{'有分估算均分':^12} | {'生均点击量':^10} | {'班内活跃分位':^12} | {'零点击人次':^10} | {'重修生人次':^10}"
+    )
+    print(header)
+    print("-" * 140)
+    for row in result_rows:
+        res, cnt, sc_cov, enr_s, sc_s, clk, act_pct, z_clk, re_cnt = row
+        print(
+            f"{res:^16} | {cnt:>10,d} | {sc_cov:>9.1f}% | {enr_s:>12.1f} | "
+            f"{sc_s:>12.1f} | {clk:>10.1f} | {act_pct:>11.1f}% | {z_clk:>10,d} | {re_cnt:>10,d}"
+        )
+    print("-" * 140)
+
+    # 打印前 6 大客观事实标签组合
+    cursor.execute("""
+        SELECT factual_tag_summary, COUNT(*), ROUND(COUNT(*)::numeric / 32593 * 100, 2) AS pct
+        FROM ads.ads_student_course_diagnostic
+        GROUP BY factual_tag_summary
+        ORDER BY COUNT(*) DESC
+        LIMIT 6;
+    """)
+    tag_rows = cursor.fetchall()
+    print("\n🏷️ 【高频客观事实标签画像 Top 6】(任课教师班级学情快速检索画像)：")
+    for rank, (tag, cnt, pct) in enumerate(tag_rows, 1):
+        print(f"   {rank}. [{tag}] : {cnt:>6,d} 人次 ({pct:>5.2f}%)")
+    print("=" * 140 + "\n")
+
+
 def main() -> None:
     dsn = resolve_dsn()
     print("==============================================================================")
@@ -259,16 +422,19 @@ def main() -> None:
             with conn.cursor() as cur:
                 print("⏳ 正在执行 ADS 建表与指标加工计算...")
                 cur.execute(sql_content)
-                print("✅ SQL 执行完毕，已生成 ads.ads_course_teaching_kpi 表。")
+                print("✅ SQL 执行完毕，已生成 ads 应用层两张核心成品表。")
 
-                # 执行 8 重原子级质量门禁与指标守恒断言
+                # 1. 校验与展示表一：课程开课批次成效与指标概览大盘 (22 行)
                 validate_ads_course_teaching_kpi(cur)
-
-                # 打印业务决策大屏
                 print_teaching_kpi_dashboard(cur)
+
+                # 2. 校验与展示表二：期末学生单科学情诊断与表现分析表 (32,593 行)
+                validate_ads_student_course_diagnostic(cur)
+                print_student_diagnostic_dashboard(cur)
 
         print("🎉 [SUCCESS] ADS 应用层表构建成功，所有质量门禁 100% 通过，事务已安全提交！\n")
 
 
 if __name__ == "__main__":
     main()
+
