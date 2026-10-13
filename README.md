@@ -66,7 +66,29 @@
 
 ---
 
-## 三、 核心工程亮点与口径治理 (Engineering Highlights)
+## 三、 数仓应用看板效果演示 (ADS Dashboard Showcase)
+
+本项目在最顶层落地了面向管理层驾驶舱与任课教师微观复盘的两大 ADS 核心数据集市，直连自建交互式 Web 分析大屏：
+
+### 1. 宏观开课成效大盘 (Executive Teaching KPI 看板)
+> 覆盖 22 门开课批次，并列展现全员选课通过率 (47.20%) 与已结课通过率 (68.57%) 双口径指标，揭示 31.16% 综合退课率对大盘的拉低影响；三阶梯学术估算得分与客观成效预警分级联动。
+
+<p align="center">
+  <img src="assets/dashboard_macro_kpi.png" alt="宏观开课成效大盘" width="95%" />
+</p>
+
+---
+
+### 2. 微观单科学情诊断工作台 (Student Academic Diagnostic 复盘台)
+> 覆盖 32,593 行学生单科学情全貌，构建 `Distinction / Pass / Fail / Withdrawn` 4 大考评群体的行为对照矩阵，精准呈现高频客观事实标签画像，支持同班相对活跃/成绩分位数的微观检索与下钻。
+
+<p align="center">
+  <img src="assets/dashboard_student_diagnostic.png" alt="微观单科学情诊断工作台" width="95%" />
+</p>
+
+---
+
+## 四、 核心工程亮点与口径治理 (Engineering Highlights)
 
 ### 1. 协议级流式安全接入管道 (ODS)
 * **内存隔离与极速入库**：针对 1,065 万行的大型交互日志 `studentVle.csv`（单文件 433MB），基于 Python 底层流与 PostgreSQL 原生流式复制二进制协议，设计 1MB 分块流式传输机制。在宿主机内存严格控制在 20MB 以内的前提下，60 秒内完成全量入库。
@@ -104,7 +126,7 @@
 
 ---
 
-## 四、 项目目录拓扑 (Directory Structure)
+## 五、 项目目录拓扑 (Directory Structure)
 
 ```text
 oulad-learning-dw/
@@ -133,7 +155,7 @@ oulad-learning-dw/
 
 ---
 
-## 五、 数据集获取与快速复现指南 (Quick Start)
+## 六、 数据集获取与快速复现指南 (Quick Start)
 
 ### 1. 原始数据集获取
 为遵循工业级规范，**原始数据文件绝不提交到 Git 仓库**（`studentVle.csv` 单文件达 433MB，超出 GitHub 100MB 限制）。
@@ -183,7 +205,7 @@ python3 scripts/load_ads.py
 
 ---
 
-## 六、 质量保障与门禁校验矩阵 (Data Quality Gates)
+## 七、 质量保障与门禁校验矩阵 (Data Quality Gates)
 
 数仓在 `load_dws.py` 与 `load_ads.py` 内部均实现了**事务内 Pre-commit 刚性数据质量门禁**。若任何断言失败，整个事务将立即回滚，确保数仓物理存储不受脏数据污染：
 
@@ -205,6 +227,6 @@ python3 scripts/load_ads.py
 
 ---
 
-## 七、 许可证 (License)
+## 八、 许可证 (License)
 
 本项目代码部分遵循 [MIT License](LICENSE) 开源协议；OULAD 数据集遵循原作者与英国开放大学的开放学术研究许可。
